@@ -1,0 +1,365 @@
+name: Auto Release on PR Merge
+
+trigger:
+  branches:
+    include:
+    - develop
+    - staging
+    - main
+
+pr: none
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  - name: shouldCreateRelease
+    value: false
+  - name: newVersion
+    value: ''
+  - name: changeType
+    value: ''
+  - name: changelogContent
+    value: ''
+
+steps:
+- checkout: self
+  persistCredentials: true
+  fetchDepth: 0
+
+- task: PowerShell@2
+  displayName: 'Configure Git'
+  inputs:
+    targetType: 'inline'
+    script: |
+      git config user.name "Azure DevOps"
+      git config user.email "azuredevops@company.com"
+
+- task: PowerShell@2
+  displayName: 'Analyze commits and determine version'
+  inputs:
+    targetType: 'inline'
+    script: |
+      # Get last tag
+      $lastTag = git describe --tags --abbrev=0 2>$null
+      if (-not $lastTag) {
+          $lastTag = "v0.0.0"
+          Write-Host "No previous tags found, starting from $lastTag"
+      }
+      Write-Host "Last tag: $lastTag"
+      
+      # Get commits since last tag
+      $commits = git log "$lastTag..HEAD" --pretty=format:"%H|%s|%an|%ad" --date=short
+      
+      if (-not $commits) {
+          Write-Host "No new commits since last tag"
+          Write-Host "##vso[task.setvariable variable=shouldCreateRelease]false"
+          exit 0
+      }
+      
+      Write-Host "Commits found since $lastTag"
+      
+      # Parse current version
+      $version = $lastTag -replace '^v', ''
+      $versionParts = $version -split '\.'
+      $major = [int]$versionParts[0]
+      $minor = [int]$versionParts[1]
+      $patch = [int]$versionParts[2]
+      
+      # Initialize changelog sections
+      $features = @()
+      $fixes = @()
+      $docs = @()
+      $styles = @()
+      $refactors = @()
+      $tests = @()
+      $chores = @()
+      $performances = @()
+      $builds = @()
+      $ci = @()
+      $breaking = @()
+      $reverts = @()
+      
+      $hasBreakingChange = $false
+      $hasFeature = $false
+      $hasFix = $false
+      
+      # Analyze each commit
+      foreach ($commitLine in $commits) {
+          if (-not $commitLine) { continue }
+          
+          $parts = $commitLine -split '\|'
+          $hash = $parts[0].Substring(0, 7)
+          $message = $parts[1]
+          $author = $parts[2]
+          $date = $parts[3]
+          
+          $commitInfo = @{
+              Hash = $hash
+              Message = $message
+              Author = $author
+              Date = $date
+          }
+          
+          # Check for breaking changes
+          if ($message -match "BREAKING CHANGE|!:") {
+              $hasBreakingChange = $true
+              $breaking += $commitInfo
+          }
+          
+          # Categorize by conventional commit type
+          switch -Regex ($message) {
+              "^feat(\(.+\))?:" { 
+                  $hasFeature = $true
+                  $features += $commitInfo 
+              }
+              "^fix(\(.+\))?:" { 
+                  $hasFix = $true
+                  $fixes += $commitInfo 
+              }
+              "^docs(\(.+\))?:" { $docs += $commitInfo }
+              "^style(\(.+\))?:" { $styles += $commitInfo }
+              "^refactor(\(.+\))?:" { $refactors += $commitInfo }
+              "^test(\(.+\))?:" { $tests += $commitInfo }
+              "^chore(\(.+\))?:" { $chores += $commitInfo }
+              "^perf(\(.+\))?:" { $performances += $commitInfo }
+              "^build(\(.+\))?:" { $builds += $commitInfo }
+              "^ci(\(.+\))?:" { $ci += $commitInfo }
+              "^revert(\(.+\))?:" { $reverts += $commitInfo }
+          }
+      }
+      
+      # Determine version bump
+      if ($hasBreakingChange) {
+          $major++
+          $minor = 0
+          $patch = 0
+          $changeType = "MAJOR"
+      } elseif ($hasFeature) {
+          $minor++
+          $patch = 0
+          $changeType = "MINOR"
+      } elseif ($hasFix) {
+          $patch++
+          $changeType = "PATCH"
+      } else {
+          Write-Host "No significant changes found for versioning"
+          Write-Host "##vso[task.setvariable variable=shouldCreateRelease]false"
+          exit 0
+      }
+      
+      $newVersion = "v$major.$minor.$patch"
+      Write-Host "New version: $newVersion ($changeType)"
+      
+      # Generate changelog content
+      $changelogBuilder = @()
+      $changelogBuilder += "# Changelog"
+      $changelogBuilder += ""
+      $changelogBuilder += "## [$newVersion] - $(Get-Date -Format 'yyyy-MM-dd')"
+      $changelogBuilder += ""
+      
+      if ($breaking.Count -gt 0) {
+          $changelogBuilder += "### ⚠️ BREAKING CHANGES"
+          foreach ($item in $breaking) {
+              $cleanMessage = $item.Message -replace "^[^:]+:\s*", ""
+              $changelogBuilder += "- **BREAKING:** $cleanMessage ([$($item.Hash)])"
+          }
+          $changelogBuilder += ""
+      }
+      
+      if ($features.Count -gt 0) {
+          $changelogBuilder += "### ✨ Features"
+          foreach ($item in $features) {
+              $cleanMessage = $item.Message -replace "^feat(\([^)]+\))?:\s*", ""
+              $scope = if ($item.Message -match "^feat\(([^)]+)\):") { "**$($matches[1]):** " } else { "" }
+              $changelogBuilder += "- $scope$cleanMessage ([$($item.Hash)])"
+          }
+          $changelogBuilder += ""
+      }
+      
+      if ($fixes.Count -gt 0) {
+          $changelogBuilder += "### 🐛 Bug Fixes"
+          foreach ($item in $fixes) {
+              $cleanMessage = $item.Message -replace "^fix(\([^)]+\))?:\s*", ""
+              $scope = if ($item.Message -match "^fix\(([^)]+)\):") { "**$($matches[1]):** " } else { "" }
+              $changelogBuilder += "- $scope$cleanMessage ([$($item.Hash)])"
+          }
+          $changelogBuilder += ""
+      }
+      
+      if ($performances.Count -gt 0) {
+          $changelogBuilder += "### ⚡ Performance Improvements"
+          foreach ($item in $performances) {
+              $cleanMessage = $item.Message -replace "^perf(\([^)]+\))?:\s*", ""
+              $scope = if ($item.Message -match "^perf\(([^)]+)\):") { "**$($matches[1]):** " } else { "" }
+              $changelogBuilder += "- $scope$cleanMessage ([$($item.Hash)])"
+          }
+          $changelogBuilder += ""
+      }
+      
+      if ($refactors.Count -gt 0) {
+          $changelogBuilder += "### ♻️ Code Refactoring"
+          foreach ($item in $refactors) {
+              $cleanMessage = $item.Message -replace "^refactor(\([^)]+\))?:\s*", ""
+              $scope = if ($item.Message -match "^refactor\(([^)]+)\):") { "**$($matches[1]):** " } else { "" }
+              $changelogBuilder += "- $scope$cleanMessage ([$($item.Hash)])"
+          }
+          $changelogBuilder += ""
+      }
+      
+      if ($docs.Count -gt 0) {
+          $changelogBuilder += "### 📚 Documentation"
+          foreach ($item in $docs) {
+              $cleanMessage = $item.Message -replace "^docs(\([^)]+\))?:\s*", ""
+              $scope = if ($item.Message -match "^docs\(([^)]+)\):") { "**$($matches[1]):** " } else { "" }
+              $changelogBuilder += "- $scope$cleanMessage ([$($item.Hash)])"
+          }
+          $changelogBuilder += ""
+      }
+      
+      if ($tests.Count -gt 0) {
+          $changelogBuilder += "### 🧪 Tests"
+          foreach ($item in $tests) {
+              $cleanMessage = $item.Message -replace "^test(\([^)]+\))?:\s*", ""
+              $scope = if ($item.Message -match "^test\(([^)]+)\):") { "**$($matches[1]):** " } else { "" }
+              $changelogBuilder += "- $scope$cleanMessage ([$($item.Hash)])"
+          }
+          $changelogBuilder += ""
+      }
+      
+      if ($builds.Count -gt 0) {
+          $changelogBuilder += "### 🏗️ Build System"
+          foreach ($item in $builds) {
+              $cleanMessage = $item.Message -replace "^build(\([^)]+\))?:\s*", ""
+              $scope = if ($item.Message -match "^build\(([^)]+)\):") { "**$($matches[1]):** " } else { "" }
+              $changelogBuilder += "- $scope$cleanMessage ([$($item.Hash)])"
+          }
+          $changelogBuilder += ""
+      }
+      
+      if ($ci.Count -gt 0) {
+          $changelogBuilder += "### 👷 CI/CD"
+          foreach ($item in $ci) {
+              $cleanMessage = $item.Message -replace "^ci(\([^)]+\))?:\s*", ""
+              $scope = if ($item.Message -match "^ci\(([^)]+)\):") { "**$($matches[1]):** " } else { "" }
+              $changelogBuilder += "- $scope$cleanMessage ([$($item.Hash)])"
+          }
+          $changelogBuilder += ""
+      }
+      
+      if ($chores.Count -gt 0) {
+          $changelogBuilder += "### 🔧 Maintenance"
+          foreach ($item in $chores) {
+              $cleanMessage = $item.Message -replace "^chore(\([^)]+\))?:\s*", ""
+              $scope = if ($item.Message -match "^chore\(([^)]+)\):") { "**$($matches[1]):** " } else { "" }
+              $changelogBuilder += "- $scope$cleanMessage ([$($item.Hash)])"
+          }
+          $changelogBuilder += ""
+      }
+      
+      if ($styles.Count -gt 0) {
+          $changelogBuilder += "### 💄 Styles"
+          foreach ($item in $styles) {
+              $cleanMessage = $item.Message -replace "^style(\([^)]+\))?:\s*", ""
+              $scope = if ($item.Message -match "^style\(([^)]+)\):") { "**$($matches[1]):** " } else { "" }
+              $changelogBuilder += "- $scope$cleanMessage ([$($item.Hash)])"
+          }
+          $changelogBuilder += ""
+      }
+      
+      if ($reverts.Count -gt 0) {
+          $changelogBuilder += "### ⏪ Reverts"
+          foreach ($item in $reverts) {
+              $cleanMessage = $item.Message -replace "^revert(\([^)]+\))?:\s*", ""
+              $changelogBuilder += "- $cleanMessage ([$($item.Hash)])"
+          }
+          $changelogBuilder += ""
+      }
+      
+      $changelogBuilder += "---"
+      $changelogBuilder += ""
+      
+      $changelogContent = $changelogBuilder -join "`n"
+      
+      # Set variables for next steps
+      Write-Host "##vso[task.setvariable variable=shouldCreateRelease]true"
+      Write-Host "##vso[task.setvariable variable=newVersion]$newVersion"
+      Write-Host "##vso[task.setvariable variable=changeType]$changeType"
+      
+      # Save changelog to file for artifact
+      $changelogContent | Out-File -FilePath "$(Agent.TempDirectory)/changelog.md" -Encoding UTF8
+      
+      Write-Host "Changelog generated successfully"
+
+- task: PowerShell@2
+  displayName: 'Update CHANGELOG.md file'
+  condition: eq(variables.shouldCreateRelease, true)
+  inputs:
+    targetType: 'inline'
+    script: |
+      $newChangelogContent = Get-Content "$(Agent.TempDirectory)/changelog.md" -Raw
+      
+      # Check if CHANGELOG.md exists
+      if (Test-Path "CHANGELOG.md") {
+          $existingContent = Get-Content "CHANGELOG.md" -Raw
+          # Merge new content with existing
+          $fullChangelog = $newChangelogContent + "`n" + $existingContent
+      } else {
+          $fullChangelog = $newChangelogContent
+      }
+      
+      # Write updated changelog
+      $fullChangelog | Out-File -FilePath "CHANGELOG.md" -Encoding UTF8
+      
+      Write-Host "CHANGELOG.md updated successfully"
+
+- task: PowerShell@2
+  displayName: 'Create and push tag'
+  condition: eq(variables.shouldCreateRelease, true)
+  inputs:
+    targetType: 'inline'
+    script: |
+      $newVersion = "$(newVersion)"
+      $changeType = "$(changeType)"
+      
+      # Create annotated tag
+      git tag -a $newVersion -m "Release $newVersion - $changeType release`n`nAuto-generated by Azure DevOps"
+      
+      # Add and commit changelog
+      git add CHANGELOG.md
+      git commit -m "docs: update CHANGELOG.md for $newVersion [skip ci]"
+      
+      # Push changes and tag
+      git push origin HEAD:$(Build.SourceBranch)
+      git push origin $newVersion
+      
+      Write-Host "✅ Tag $newVersion created and pushed to repository"
+      Write-Host "✅ CHANGELOG.md updated and committed"
+
+- task: PublishBuildArtifacts@1
+  displayName: 'Publish changelog artifact'
+  condition: eq(variables.shouldCreateRelease, true)
+  inputs:
+    pathToPublish: 'CHANGELOG.md'
+    artifactName: 'changelog'
+    publishLocation: 'Container'
+
+- task: PowerShell@2
+  displayName: 'Summary'
+  condition: eq(variables.shouldCreateRelease, true)
+  inputs:
+    targetType: 'inline'
+    script: |
+      Write-Host "🎉 Release Summary:" -ForegroundColor Green
+      Write-Host "   Version: $(newVersion)" -ForegroundColor Cyan
+      Write-Host "   Type: $(changeType)" -ForegroundColor Cyan
+      Write-Host "   Changelog: Updated and committed" -ForegroundColor Cyan
+      Write-Host "   Tag: Created and pushed to remote" -ForegroundColor Cyan
+
+- task: PowerShell@2
+  displayName: 'No release needed'
+  condition: eq(variables.shouldCreateRelease, false)
+  inputs:
+    targetType: 'inline'
+    script: |
+      Write-Host "ℹ️ No release created - no significant changes found" -ForegroundColor Yellow

@@ -1,0 +1,9 @@
+﻿namespace PropertySystem.Infrastructure.Authentication;
+
+public sealed class AuthenticationOptions
+{
+    public string Audiencie { get; init; } = string.Empty;
+    public string MetadataUrl { get; init; } = string.Empty;
+    public bool RequireHttpsMetadata { get; init; }
+    public string Issuer { get; set; } = string.Empty;
+}
