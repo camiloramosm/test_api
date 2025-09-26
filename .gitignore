@@ -108,8 +108,6 @@ StyleCopReport.xml
 # Node.js (si usas frontend tools)
 node_modules/
 npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
 
 # JetBrains Rider
 .idea/
